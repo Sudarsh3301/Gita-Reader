@@ -1686,8 +1686,8 @@ Expected JSON:
 
 
 
-def render_search_result_minimal(result: SearchResult, result_num: int):
-    """Render search result in minimal format"""
+def render_search_result_minimal(result: SearchResult, result_num: int, enable_groq: bool = False, groq_api_key: str = ""):
+    """Render search result in minimal format with optional AI summary generation"""
     verse = result.verse
 
     st.markdown(f"### {result_num}. Chapter {verse.chapter}, Verse {verse.verse}")
@@ -1708,6 +1708,62 @@ def render_search_result_minimal(result: SearchResult, result_num: int):
 
     if 'english' in verse.translations:
         st.markdown(f"**English:** {verse.translations['english']}")
+
+    # Individual AI Summary Generation Button
+    if enable_groq and groq_api_key and result.commentaries:
+        col_summary1, col_summary2 = st.columns([3, 1])
+        with col_summary1:
+            st.markdown("**🤖 AI Commentary Analysis**")
+        with col_summary2:
+            if st.button(f"Generate Summary", key=f"generate_summary_{verse.id}_{result_num}"):
+                try:
+                    with st.spinner(f"Generating AI summary for verse {verse.id}..."):
+                        # Collect commentaries for this specific verse
+                        verse_commentaries = []
+                        for i, commentary in enumerate(result.commentaries):
+                            if commentary.text and len(commentary.text.strip()) > 10:
+                                verse_commentaries.append({
+                                    'id': f"C{i+1}",
+                                    'school': commentary.school,
+                                    'text': commentary.text
+                                })
+
+                        if verse_commentaries:
+                            # Generate summary for this specific verse
+                            is_free_trial = st.session_state.get('using_free_trial', False)
+                            verse_summary = query_groq_with_usage_tracking(
+                                verse_commentaries,
+                                st.session_state.get('last_query', ''),
+                                groq_api_key,
+                                is_free_trial
+                            )
+
+                            # Store in session state
+                            if 'verse_summaries' not in st.session_state:
+                                st.session_state.verse_summaries = {}
+                            st.session_state.verse_summaries[verse.id] = verse_summary
+
+                            # Show success/failure message
+                            if verse_summary.get('summary') != "INSUFFICIENT_GROUNDED_EVIDENCE":
+                                st.success(f"✅ Summary generated for verse {verse.id}")
+
+                                # Show free trial usage info if applicable
+                                if is_free_trial:
+                                    user_id = get_user_id()
+                                    remaining = get_remaining_free_uses(user_id)
+                                    if remaining > 0:
+                                        st.info(f"🎁 Free trial: {remaining} uses remaining")
+                                    else:
+                                        st.warning("🚫 Free trial exhausted. Add your own API key to continue.")
+                            else:
+                                st.warning(f"Could not generate reliable summary for verse {verse.id}")
+
+                            st.rerun()
+                        else:
+                            st.error("No valid commentaries found for this verse")
+                except Exception as e:
+                    st.error(f"Error generating summary: {str(e)}")
+                    # Don't rerun on error to avoid infinite loops
 
     # Display per-verse AI summary if available
     verse_summaries = st.session_state.get('verse_summaries', {})
