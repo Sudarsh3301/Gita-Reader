@@ -45,7 +45,7 @@ queries_remaining = max(0, 3 - st.session_state.query_count)
 
 if queries_remaining > 0:
     st.success(f"🎁 {queries_remaining} free AI summaries remaining!")
-    groq_api_key = "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"
+    groq_api_key = "gsk_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 ```
 **Status**: ✅ Found at lines 1662-1667
 

@@ -12,6 +12,8 @@ from dataclasses import dataclass
 import requests
 from datetime import datetime
 import hashlib
+import uuid
+import time
 
 # Import the graph visualization module
 try:
@@ -45,6 +47,10 @@ FAISS_INDEX_PATH = "gita_faiss.index"
 MAPPINGS_PATH = "gita_mappings.pkl"
 DATA_FILE = "merged_gita_clean.json"
 SUMMARIES_CACHE = "commentary_summaries.json"
+
+# Free Trial Configuration
+FREE_TRIAL_USES = 3
+USAGE_TRACKING_FILE = "usage_tracking.json"
 
 @dataclass
 class VerseNode:
@@ -80,6 +86,101 @@ class SearchResult:
     related_concepts: List[str]
     commentaries: List[CommentaryNode]
     support_count: int
+
+# Usage Tracking Functions
+def get_user_id():
+    """Get or create a unique user ID for tracking usage"""
+    if 'user_id' not in st.session_state:
+        st.session_state.user_id = str(uuid.uuid4())
+    return st.session_state.user_id
+
+def load_usage_data():
+    """Load usage tracking data from file"""
+    try:
+        if os.path.exists(USAGE_TRACKING_FILE):
+            with open(USAGE_TRACKING_FILE, 'r') as f:
+                return json.load(f)
+    except Exception:
+        pass
+    return {}
+
+def save_usage_data(usage_data):
+    """Save usage tracking data to file"""
+    try:
+        with open(USAGE_TRACKING_FILE, 'w') as f:
+            json.dump(usage_data, f, indent=2)
+    except Exception:
+        pass
+
+def get_user_usage_count(user_id):
+    """Get the current usage count for a user"""
+    usage_data = load_usage_data()
+    return usage_data.get(user_id, {}).get('usage_count', 0)
+
+def increment_user_usage(user_id):
+    """Increment usage count for a user"""
+    usage_data = load_usage_data()
+    if user_id not in usage_data:
+        usage_data[user_id] = {
+            'usage_count': 0,
+            'first_use': datetime.now().isoformat(),
+            'last_use': datetime.now().isoformat()
+        }
+
+    usage_data[user_id]['usage_count'] += 1
+    usage_data[user_id]['last_use'] = datetime.now().isoformat()
+    save_usage_data(usage_data)
+    return usage_data[user_id]['usage_count']
+
+def get_free_trial_api_key():
+    """Get the free trial API key from secrets"""
+    try:
+        return st.secrets.get("groq_key", "")
+    except Exception:
+        return ""
+
+def can_use_free_trial(user_id):
+    """Check if user can still use free trial"""
+    usage_count = get_user_usage_count(user_id)
+    return usage_count < FREE_TRIAL_USES
+
+def get_remaining_free_uses(user_id):
+    """Get remaining free uses for a user"""
+    usage_count = get_user_usage_count(user_id)
+    return max(0, FREE_TRIAL_USES - usage_count)
+
+def query_groq_with_usage_tracking(commentaries_data: List[Dict], query: str, api_key: str, is_free_trial: bool = False) -> Dict:
+    """Wrapper for GROQ API that handles usage tracking for free trial"""
+    if is_free_trial:
+        user_id = get_user_id()
+        if not can_use_free_trial(user_id):
+            return {
+                "summary": "INSUFFICIENT_GROUNDED_EVIDENCE",
+                "direction": "insufficient_evidence",
+                "supporting_ids": [],
+                "supporting_schools": [],
+                "confidence_score": 0.0,
+                "note": "Free trial uses exhausted. Please add your own API key."
+            }
+
+        # Increment usage count for free trial
+        new_count = increment_user_usage(user_id)
+        remaining = FREE_TRIAL_USES - new_count
+
+        # Call the actual API
+        result = query_groq_api_aggregate(commentaries_data, query, api_key)
+
+        # Add usage info to the result
+        if isinstance(result, dict):
+            result['free_trial_info'] = {
+                'uses_remaining': remaining,
+                'total_uses': FREE_TRIAL_USES
+            }
+
+        return result
+    else:
+        # Regular API call without usage tracking
+        return query_groq_api_aggregate(commentaries_data, query, api_key)
 
 # Cached resource loaders
 @st.cache_resource
@@ -1594,27 +1695,44 @@ def main():
         with st.form("search_config"):
             num_results = st.slider("Number of results", 1, max_results, 3)
             
-            # GROQ settings
+            # GROQ settings with free trial
             st.subheader("🤖 AI Enhancement")
             enable_groq = st.checkbox("Enable GROQ Summaries", value=False)
             groq_api_key = ""
+            using_free_trial = False
+
             if enable_groq:
-                # Try to get API key from Streamlit secrets first
-                try:
-                    groq_api_key = st.secrets["GROQ_API_KEY"]
-                    if groq_api_key == "your-groq-api-key-here":
-                        groq_api_key = ""
-                except (KeyError, FileNotFoundError):
-                    groq_api_key = ""
+                user_id = get_user_id()
+                remaining_uses = get_remaining_free_uses(user_id)
 
-                # If no secret key, ask user for input
+                # Show free trial status
+                if remaining_uses > 0:
+                    st.success(f"🎁 Free Trial: {remaining_uses} uses remaining")
+                    if st.button("Use Free Trial", key="use_free_trial"):
+                        free_trial_key = get_free_trial_api_key()
+                        if free_trial_key:
+                            groq_api_key = free_trial_key
+                            using_free_trial = True
+                            st.session_state.using_free_trial = True
+                        else:
+                            st.error("Free trial API key not configured on server")
+                else:
+                    st.warning("🚫 Free trial uses exhausted")
+
+                # Option to use own API key
+                st.markdown("**Or use your own API key:**")
+                groq_api_key_input = st.text_input("GROQ API Key", type="password",
+                                                 help="Get a free API key from https://console.groq.com/")
+                if groq_api_key_input:
+                    groq_api_key = groq_api_key_input
+                    using_free_trial = False
+                    st.session_state.using_free_trial = False
+
                 if not groq_api_key:
-                    groq_api_key_input = st.text_input("GROQ API Key", type="password",
-                                                     help="Get a free API key from https://console.groq.com/")
-                    groq_api_key = groq_api_key_input if groq_api_key_input else ""
-
-                    if not groq_api_key:
-                        st.info("💡 Add your GROQ API key to use AI summaries.")
+                    if remaining_uses > 0:
+                        st.info("💡 Click 'Use Free Trial' above or add your own GROQ API key.")
+                    else:
+                        st.info("💡 Add your GROQ API key to continue using AI summaries.")
             
             # Interactive KG
             if GRAPH_VIZ_AVAILABLE:
@@ -1710,10 +1828,12 @@ def main():
 
                             if verse_commentaries:
                                 # Generate summary for this specific verse
-                                verse_summary = query_groq_api_aggregate(
+                                is_free_trial = st.session_state.get('using_free_trial', False)
+                                verse_summary = query_groq_with_usage_tracking(
                                     verse_commentaries,
                                     st.session_state.last_query,
-                                    groq_api_key
+                                    groq_api_key,
+                                    is_free_trial
                                 )
                                 verse_summaries[result.verse.id] = verse_summary
 
@@ -1738,6 +1858,15 @@ def main():
 
                     if successful_summaries > 0:
                         st.success(f"✅ Generated summaries for {successful_summaries} out of {len(verse_summaries)} verses!")
+
+                        # Show free trial usage info if applicable
+                        if st.session_state.get('using_free_trial', False):
+                            user_id = get_user_id()
+                            remaining = get_remaining_free_uses(user_id)
+                            if remaining > 0:
+                                st.info(f"🎁 Free trial: {remaining} uses remaining")
+                            else:
+                                st.warning("🚫 Free trial exhausted. Add your own API key to continue.")
                     else:
                         st.warning("Could not generate reliable summaries for any verses.")
 

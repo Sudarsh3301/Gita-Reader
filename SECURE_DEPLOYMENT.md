@@ -15,7 +15,7 @@ The Git warning you received was because an actual API key was detected in your 
 #### **Before (INSECURE):**
 ```toml
 # .streamlit/secrets.toml
-GROQ_API_KEY = "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"
+GROQ_API_KEY = "gsk_XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
 ```
 
 #### **After (SECURE):**
