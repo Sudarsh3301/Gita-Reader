@@ -32,6 +32,7 @@ try:
     from pyvis.network import Network
     import networkx as nx
     PYVIS_AVAILABLE = True
+    NETWORKX_AVAILABLE = True
 except ImportError:
     PYVIS_AVAILABLE = False
     try:
@@ -39,7 +40,7 @@ except ImportError:
         NETWORKX_AVAILABLE = True
     except ImportError:
         NETWORKX_AVAILABLE = False
-    st.warning("Graph visualization module not available. Interactive KG will be disabled.")
+    # Don't show warning here - will show in UI when needed
 
 # Configuration
 EMBEDDING_MODEL = 'sentence-transformers/LaBSE'
@@ -1162,6 +1163,129 @@ def create_subgraph_for_results(results: List[SearchResult], max_nodes: int = 50
         'total_edges': len(edges)
     }
 
+def create_subgraph_for_results_fallback(results: List[SearchResult], max_nodes: int = 50):
+    """Create a focused subgraph for visualization without external dependencies"""
+    # Create a subgraph with relevant nodes and metadata
+    nodes = []
+    edges = []
+    node_data = {}
+
+    for result in results[:10]:  # Limit to top 10 results
+        verse_id = f"verse:{result.verse.id}"
+
+        # Add verse node with metadata
+        if verse_id not in node_data:
+            nodes.append(verse_id)
+            node_data[verse_id] = {
+                'type': 'verse',
+                'id': result.verse.id,
+                'chapter': result.verse.chapter,
+                'verse': result.verse.verse,
+                'shloka': result.verse.shloka[:100] + "..." if len(result.verse.shloka) > 100 else result.verse.shloka,
+                'score': result.score
+            }
+
+        # Add concept nodes
+        for concept in result.related_concepts[:3]:
+            concept_id = f"concept:{concept}"
+            if concept_id not in node_data:
+                nodes.append(concept_id)
+                node_data[concept_id] = {
+                    'type': 'concept',
+                    'term': concept,
+                    'id': concept
+                }
+            edges.append({
+                'source': verse_id,
+                'target': concept_id,
+                'relationship': "MENTIONS"
+            })
+
+        # Add commentary nodes
+        for commentary in result.commentaries[:2]:
+            commentary_id = f"commentary:{commentary.id}"
+            if commentary_id not in node_data:
+                nodes.append(commentary_id)
+                node_data[commentary_id] = {
+                    'type': 'commentary',
+                    'id': commentary.id,
+                    'school': commentary.school,
+                    'author': commentary.original_author or commentary.substitute_author,
+                    'text_preview': commentary.text[:200] + "..." if len(commentary.text) > 200 else commentary.text
+                }
+            edges.append({
+                'source': commentary_id,
+                'target': verse_id,
+                'relationship': "COMMENTS_ON"
+            })
+
+    return {
+        'nodes': nodes,
+        'edges': edges,
+        'node_data': node_data,
+        'total_nodes': len(nodes),
+        'total_edges': len(edges)
+    }
+
+def render_simple_node_list(subgraph: Dict):
+    """Simple fallback visualization showing nodes and connections"""
+    st.subheader("📊 Knowledge Graph Structure")
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+        st.markdown("**Nodes:**")
+        node_types = {}
+        for node in subgraph['nodes']:
+            node_type = node.split(':', 1)[0]
+            node_types[node_type] = node_types.get(node_type, 0) + 1
+            st.write(f"• {node}")
+
+    with col2:
+        st.markdown("**Node Types:**")
+        for node_type, count in node_types.items():
+            st.metric(node_type.title(), count)
+
+        st.markdown("**Connections:**")
+        for edge in subgraph['edges'][:5]:
+            source_short = edge['source'].split(':', 1)[1][:15]
+            target_short = edge['target'].split(':', 1)[1][:15]
+            st.write(f"• {source_short} → {target_short}")
+
+        if len(subgraph['edges']) > 5:
+            st.write(f"... and {len(subgraph['edges']) - 5} more connections")
+
+def render_networkx_graph_visualization(subgraph: Dict, results: List[SearchResult], query: str):
+    """Render graph using NetworkX (text-based layout)"""
+    if not NETWORKX_AVAILABLE:
+        st.error("NetworkX not available")
+        return
+
+    st.subheader("🌐 NetworkX Graph Analysis")
+
+    # Create NetworkX graph
+    G = create_networkx_graph(subgraph)
+    if G is None:
+        st.error("Failed to create NetworkX graph")
+        return
+
+    # Basic graph metrics
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Nodes", G.number_of_nodes())
+    with col2:
+        st.metric("Edges", G.number_of_edges())
+    with col3:
+        density = nx.density(G)
+        st.metric("Density", f"{density:.3f}")
+    with col4:
+        if G.number_of_nodes() > 0:
+            avg_degree = sum(dict(G.degree()).values()) / G.number_of_nodes()
+            st.metric("Avg Degree", f"{avg_degree:.1f}")
+
+    # Show graph structure
+    render_simple_node_list(subgraph)
+
 def split_text_into_sentences(text: str, max_tokens: int = 200) -> List[str]:
     """Split text into sentences or short snippets with token limit"""
     if not text:
@@ -1700,10 +1824,14 @@ def main():
             enable_groq = st.checkbox("Enable GROQ Summaries", value=False)
 
             # Interactive KG
-            if GRAPH_VIZ_AVAILABLE:
+            if GRAPH_VIZ_AVAILABLE or PYVIS_AVAILABLE:
                 enable_kg = st.checkbox("Enable Interactive KG", value=False)
+                if enable_kg and not PYVIS_AVAILABLE and not NETWORKX_AVAILABLE:
+                    st.warning("⚠️ Graph visualization libraries not available. Will use text-based visualization.")
             else:
-                enable_kg = False
+                enable_kg = st.checkbox("Enable Basic KG (Text-based)", value=False)
+                if enable_kg:
+                    st.info("💡 For interactive graphs, install: pip install pyvis networkx")
 
             st.form_submit_button("Update Settings")
 
@@ -1773,7 +1901,7 @@ def main():
     
     # Main content area
     st.title("Sacred Semantics")
-    st.markdown("*Semantic search with AI-powered commentary synthesis*")
+    st.markdown("*From shloka to insight, instantly*.Discover meanings, perspectives, and schools of thought woven into the Bhagavad Gita — powered by knowledge graphs and semantic search")
     
     # Search interface
     st.header("🔍 Search Interface")
@@ -1816,121 +1944,71 @@ def main():
     if st.session_state.search_performed and st.session_state.current_results:
         results = st.session_state.current_results
         
-        # GROQ per-verse summary section
+        # Individual AI summaries are now generated per-verse using buttons in each result
         if enable_groq and groq_api_key and results:
-            st.subheader("🤖 Generate AI Summaries for Each Verse")
-
-            if st.button("Generate Combined Summaries for Each Verse"):
-                with st.spinner("Generating AI summaries for each verse..."):
-                    verse_summaries = {}
-                    commentary_id_counter = 1
-
-                    for result in results:
-                        st.write(f"Processing verse {result.verse.id} with {len(result.commentaries)} commentaries from {len(set(c.school for c in result.commentaries))} schools...")
-
-                        if result.commentaries and len(result.commentaries) > 0:
-                            # Collect commentaries for this specific verse
-                            verse_commentaries = []
-                            for commentary in result.commentaries:
-                                if commentary.text and len(commentary.text.strip()) > 10:
-                                    verse_commentaries.append({
-                                        'id': f"C{commentary_id_counter}",
-                                        'school': commentary.school,
-                                        'text': commentary.text
-                                    })
-                                    commentary_id_counter += 1
-
-                            if verse_commentaries:
-                                # Generate summary for this specific verse
-                                is_free_trial = st.session_state.get('using_free_trial', False)
-                                verse_summary = query_groq_with_usage_tracking(
-                                    verse_commentaries,
-                                    st.session_state.last_query,
-                                    groq_api_key,
-                                    is_free_trial
-                                )
-                                verse_summaries[result.verse.id] = verse_summary
-
-                                # Debug output for each verse
-                                if verse_summary.get('summary') == "INSUFFICIENT_GROUNDED_EVIDENCE":
-                                    st.write(f"Verse {result.verse.id}: {verse_summary.get('note', 'Insufficient evidence')}")
-                                elif not verse_summary or 'summary' not in verse_summary:
-                                    st.write(f"Verse {result.verse.id}: API call failed")
-                                else:
-                                    st.write(f"Verse {result.verse.id}: Summary generated successfully")
-                            else:
-                                st.write(f"Verse {result.verse.id}: No valid commentaries found")
-                        else:
-                            st.write(f"Verse {result.verse.id}: No commentaries available")
-
-                    # Store per-verse summaries in session state
-                    st.session_state.verse_summaries = verse_summaries
-
-                    # Show overall success message
-                    successful_summaries = sum(1 for summary in verse_summaries.values()
-                                             if summary.get('summary') != "INSUFFICIENT_GROUNDED_EVIDENCE")
-
-                    if successful_summaries > 0:
-                        st.success(f"✅ Generated summaries for {successful_summaries} out of {len(verse_summaries)} verses!")
-
-                        # Show free trial usage info if applicable
-                        if st.session_state.get('using_free_trial', False):
-                            user_id = get_user_id()
-                            remaining = get_remaining_free_uses(user_id)
-                            if remaining > 0:
-                                st.info(f"🎁 Free trial: {remaining} uses remaining")
-                            else:
-                                st.warning("🚫 Free trial exhausted. Add your own API key to continue.")
-                    else:
-                        st.warning("Could not generate reliable summaries for any verses.")
+            st.info("💡 **Per-Verse AI Summaries**: Use the 'Generate Summary' button on each verse result below to get focused AI commentary analysis.")
 
 
         # Results display
-        if enable_kg and GRAPH_VIZ_AVAILABLE:
+        if enable_kg:
             # Tabbed interface for full mode
-            tab1, tab2 = st.tabs(["📖 Search Results", "🌐 Interactive Knowledge Graph"])
-            
+            tab1, tab2 = st.tabs(["📖 Search Results", "🌐 Knowledge Graph"])
+
             with tab1:
                 st.subheader("Search Results")
                 for i, result in enumerate(results, 1):
-                    render_search_result_minimal(result, i)
+                    render_search_result_minimal(result, i, enable_groq, groq_api_key)
                     st.markdown("---")
 
-
-            
             with tab2:
-                if st.button("🔍 Build Interactive Subgraph"):
-                    with st.spinner("Building focused subgraph..."):
-                        subgraph = create_subgraph_for_results(results)
-                        if subgraph:
-                            st.success(f"Built subgraph with {len(subgraph['nodes'])} nodes")
+                st.subheader("🌐 Knowledge Graph Visualization")
 
-                            # Render interactive graph visualization using pyvis
+                # Check available visualization options
+                if PYVIS_AVAILABLE:
+                    viz_option = st.radio("Visualization Type:",
+                                        ["Interactive Graph (Pyvis)", "Text-based Graph"],
+                                        index=0)
+                elif NETWORKX_AVAILABLE:
+                    viz_option = st.radio("Visualization Type:",
+                                        ["NetworkX Analysis", "Text-based Graph"],
+                                        index=0)
+                else:
+                    viz_option = "Text-based Graph"
+                    st.info("💡 Install pyvis and networkx for interactive graphs: `pip install pyvis networkx`")
+
+                if st.button("🔍 Build Knowledge Graph"):
+                    with st.spinner("Building knowledge graph..."):
+                        # Create subgraph regardless of visualization libraries
+                        subgraph = create_subgraph_for_results_fallback(results)
+                        if subgraph:
+                            st.success(f"Built subgraph with {len(subgraph['nodes'])} nodes and {len(subgraph['edges'])} connections")
+
+                            # Choose visualization based on available libraries
                             try:
-                                render_pyvis_graph_visualization(subgraph, results, st.session_state.last_query)
+                                if viz_option == "Interactive Graph (Pyvis)" and PYVIS_AVAILABLE:
+                                    render_pyvis_graph_visualization(subgraph, results, st.session_state.last_query)
+                                elif viz_option == "NetworkX Analysis" and NETWORKX_AVAILABLE:
+                                    render_networkx_graph_visualization(subgraph, results, st.session_state.last_query)
+                                else:
+                                    # Text-based fallback
+                                    render_custom_graph_visualization(subgraph, results, st.session_state.last_query)
 
                             except Exception as e:
                                 st.error(f"Graph visualization error: {e}")
-                                st.info("Falling back to custom visualization")
-
-                                # Fallback to custom visualization
+                                st.info("Falling back to text-based visualization")
                                 try:
                                     render_custom_graph_visualization(subgraph, results, st.session_state.last_query)
                                 except Exception as e2:
-                                    st.error(f"Custom visualization error: {e2}")
-                                    st.info("Falling back to simple node list")
-
-                                    # Final fallback: Show simple node information
-                                    st.subheader("📊 Subgraph Nodes")
-                                    for node in subgraph['nodes']:
-                                        st.write(f"• {node}")
+                                    st.error(f"Fallback visualization error: {e2}")
+                                    # Final fallback: Show simple node list
+                                    render_simple_node_list(subgraph)
                         else:
-                            st.warning("Failed to create subgraph")
+                            st.warning("Failed to create subgraph - no valid data found")
         else:
             # Simple results display
             st.subheader("📖 Search Results")
             for i, result in enumerate(results, 1):
-                render_search_result_minimal(result, i)
+                render_search_result_minimal(result, i, enable_groq, groq_api_key)
                 if i < len(results):
                     st.markdown("---")
 
