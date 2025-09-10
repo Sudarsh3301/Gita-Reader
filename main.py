@@ -1655,7 +1655,7 @@ def render_search_result_minimal(result: SearchResult, result_num: int):
 
 def main():
     st.set_page_config(
-        page_title="Bhagavad Gita Semantic Search",
+        page_title="Sacred Semantics",
         page_icon="🕉️",
         layout="wide"
     )
@@ -1694,53 +1694,67 @@ def main():
         # Search configuration form
         with st.form("search_config"):
             num_results = st.slider("Number of results", 1, max_results, 3)
-            
-            # GROQ settings with free trial
+
+            # GROQ settings (basic configuration only)
             st.subheader("🤖 AI Enhancement")
             enable_groq = st.checkbox("Enable GROQ Summaries", value=False)
-            groq_api_key = ""
-            using_free_trial = False
 
-            if enable_groq:
-                user_id = get_user_id()
-                remaining_uses = get_remaining_free_uses(user_id)
-
-                # Show free trial status
-                if remaining_uses > 0:
-                    st.success(f"🎁 Free Trial: {remaining_uses} uses remaining")
-                    if st.button("Use Free Trial", key="use_free_trial"):
-                        free_trial_key = get_free_trial_api_key()
-                        if free_trial_key:
-                            groq_api_key = free_trial_key
-                            using_free_trial = True
-                            st.session_state.using_free_trial = True
-                        else:
-                            st.error("Free trial API key not configured on server")
-                else:
-                    st.warning("🚫 Free trial uses exhausted")
-
-                # Option to use own API key
-                st.markdown("**Or use your own API key:**")
-                groq_api_key_input = st.text_input("GROQ API Key", type="password",
-                                                 help="Get a free API key from https://console.groq.com/")
-                if groq_api_key_input:
-                    groq_api_key = groq_api_key_input
-                    using_free_trial = False
-                    st.session_state.using_free_trial = False
-
-                if not groq_api_key:
-                    if remaining_uses > 0:
-                        st.info("💡 Click 'Use Free Trial' above or add your own GROQ API key.")
-                    else:
-                        st.info("💡 Add your GROQ API key to continue using AI summaries.")
-            
             # Interactive KG
             if GRAPH_VIZ_AVAILABLE:
                 enable_kg = st.checkbox("Enable Interactive KG", value=False)
             else:
                 enable_kg = False
-            
+
             st.form_submit_button("Update Settings")
+
+        # Free trial and API key configuration (outside form)
+        groq_api_key = ""
+        using_free_trial = False
+
+        if enable_groq:
+            st.subheader("🔑 API Key Configuration")
+            user_id = get_user_id()
+            remaining_uses = get_remaining_free_uses(user_id)
+
+            # Show free trial status and button
+            if remaining_uses > 0:
+                col1, col2 = st.columns([2, 1])
+                with col1:
+                    st.success(f"🎁 Free Trial: {remaining_uses} uses remaining")
+                with col2:
+                    if st.button("Use Free Trial", key="use_free_trial"):
+                        free_trial_key = get_free_trial_api_key()
+                        if free_trial_key:
+                            st.session_state.groq_api_key = free_trial_key
+                            st.session_state.using_free_trial = True
+                            st.success("✅ Free trial activated!")
+                            st.rerun()
+                        else:
+                            st.error("Free trial API key not configured on server")
+            else:
+                st.warning("🚫 Free trial uses exhausted")
+
+            # Check if free trial is active
+            if st.session_state.get('using_free_trial', False) and st.session_state.get('groq_api_key'):
+                groq_api_key = st.session_state.groq_api_key
+                using_free_trial = True
+                st.info("🎁 Using free trial API key")
+
+            # Option to use own API key
+            st.markdown("**Or use your own API key:**")
+            groq_api_key_input = st.text_input("GROQ API Key", type="password",
+                                             help="Get a free API key from https://console.groq.com/")
+            if groq_api_key_input:
+                groq_api_key = groq_api_key_input
+                using_free_trial = False
+                st.session_state.using_free_trial = False
+                st.session_state.groq_api_key = groq_api_key_input
+
+            if not groq_api_key:
+                if remaining_uses > 0:
+                    st.info("💡 Click 'Use Free Trial' above or add your own GROQ API key.")
+                else:
+                    st.info("💡 Add your GROQ API key to continue using AI summaries.")
         
 
         
@@ -1758,7 +1772,7 @@ def main():
                 st.session_state.example_query = query
     
     # Main content area
-    st.title("🕉️ Bhagavad Gita Semantic Search")
+    st.title("Sacred Semantics")
     st.markdown("*Semantic search with AI-powered commentary synthesis*")
     
     # Search interface
