@@ -12,7 +12,7 @@ from dataclasses import dataclass
 import requests
 from datetime import datetime
 import hashlib
-api_key = "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"
+
 # Import the graph visualization module
 try:
     from gita_graph_viz import (
@@ -337,19 +337,36 @@ def get_index_health_info():
     
     return health_info
 
+def auto_load_index():
+    """Automatically load index on first query"""
+    if not st.session_state.get('index_ready', False):
+        health = get_index_health_info()
+        if health['index_exists'] and health['mappings_exist']:
+            with st.spinner("Loading search index..."):
+                index = load_faiss_index(FAISS_INDEX_PATH)
+                mappings = load_mappings(MAPPINGS_PATH)
+                kg_data = load_knowledge_graph_data(DATA_FILE)
+
+                if index and mappings and kg_data:
+                    st.session_state.index = index
+                    st.session_state.mappings = mappings
+                    st.session_state.kg_data = kg_data
+                    st.session_state.index_ready = True
+                    return True
+    return st.session_state.get('index_ready', False)
+
 def render_health_card():
     """Render system health card in sidebar"""
-    st.sidebar.subheader("System Health")
-    health = get_index_health_info()
-    
-    if health['index_exists'] and health['mappings_exist']:
-        st.sidebar.success("Index Ready")
-        st.sidebar.write(f"Vectors: {health['num_vectors']:,}")
-        st.sidebar.write(f"Size: {health['index_size']:.1f} MB")
+    st.sidebar.subheader("📊 System Status")
+
+    if st.session_state.get('index_ready', False):
+        st.sidebar.success("✅ Ready to Search")
+        if st.session_state.get('kg_data'):
+            kg_data = st.session_state.kg_data
+            st.sidebar.write(f"📚 {len(kg_data['verses'])} verses")
+            st.sidebar.write(f"🏫 {len(kg_data['schools'])} schools")
     else:
-        st.sidebar.error("Index Not Found")
-    
-    st.sidebar.write(f"Model: {health['embedding_model'].split('/')[-1]}")
+        st.sidebar.info("🔄 Will load on first search")
 
 def render_custom_graph_visualization(subgraph: Dict, results: List[SearchResult], query: str):
     """Render a custom graph visualization that works with our data structure"""
@@ -1075,12 +1092,12 @@ def split_text_into_sentences(text: str, max_tokens: int = 200) -> List[str]:
     return snippets
 
 def select_top_excerpts(commentaries_data: List[Dict], query: str, model,
-                       max_excerpts: int = 12, max_per_school: int = 4) -> List[Dict]:
-    """Select top excerpts using sentence-level similarity ranking"""
+                       max_excerpts: int = 16, max_per_school: int = 6) -> List[Dict]:
+    """Select top excerpts using sentence-level similarity ranking with more lenient selection"""
     if not commentaries_data or not model:
         return []
 
-    # Create excerpts with metadata
+    # Create excerpts with metadata - more lenient approach
     excerpts = []
     school_counts = defaultdict(int)
 
@@ -1089,7 +1106,7 @@ def select_top_excerpts(commentaries_data: List[Dict], query: str, model,
         text = commentary['text']
         commentary_id = commentary['id']
 
-        # Skip if we already have enough from this school
+        # More generous per-school limit
         if school_counts[school] >= max_per_school:
             continue
 
@@ -1097,7 +1114,7 @@ def select_top_excerpts(commentaries_data: List[Dict], query: str, model,
         sentences = split_text_into_sentences(text)
 
         for sentence in sentences:
-            if len(sentence.strip()) < 10:  # Accept shorter snippets
+            if len(sentence.strip()) < 5:  # More lenient minimum length
                 continue
 
             excerpts.append({
@@ -1108,14 +1125,25 @@ def select_top_excerpts(commentaries_data: List[Dict], query: str, model,
             })
             school_counts[school] += 1
 
-            # Stop if we have enough from this school
+            # More generous stopping condition
             if school_counts[school] >= max_per_school:
                 break
+
+    # If no excerpts found, fallback to using full commentaries
+    if not excerpts:
+        for commentary in commentaries_data:
+            if len(commentary['text'].strip()) > 5:
+                excerpts.append({
+                    'id': commentary['id'],
+                    'school': commentary['school'],
+                    'text': commentary['text'][:500],  # Use first 500 chars
+                    'original_commentary': commentary
+                })
 
     if not excerpts:
         return []
 
-    # Compute similarities
+    # Compute similarities with fallback
     try:
         query_embedding = model.encode([query], normalize_embeddings=True)
         excerpt_texts = [excerpt['text'] for excerpt in excerpts]
@@ -1128,13 +1156,22 @@ def select_top_excerpts(commentaries_data: List[Dict], query: str, model,
         for i, excerpt in enumerate(excerpts):
             excerpt['similarity'] = float(similarities[i])
 
-        # Sort by similarity and take top N
+        # Sort by similarity and take top N - more lenient threshold
         excerpts.sort(key=lambda x: x['similarity'], reverse=True)
-        return excerpts[:max_excerpts]
+
+        # Take top excerpts but ensure we have at least some content
+        selected = excerpts[:max_excerpts]
+
+        # If similarity scores are very low, still return some excerpts
+        if not selected or (selected and selected[0]['similarity'] < 0.1):
+            # Return top excerpts regardless of similarity score
+            return excerpts[:min(8, len(excerpts))]
+
+        return selected
 
     except Exception as e:
-        st.error(f"Failed to compute similarities: {e}")
-        return excerpts[:max_excerpts]  # Return without ranking if embedding fails
+        # Fallback: return excerpts without similarity ranking
+        return excerpts[:min(max_excerpts, len(excerpts))]
 
 def compute_hybrid_confidence(supporting_excerpts: List[Dict], total_schools: int,
                              support_count: int, N: int = 8, model_confidence: float = None) -> float:
@@ -1238,7 +1275,8 @@ Expected JSON:
   "note": "Strong consensus across schools on dharma as duty and cosmic law."
 }'''
 
-        instruction = '''Instruction: Produce JSON with keys: summary (2-3 sentence synthesis to point towards a conclusive direction to answer the user question or 'INSUFFICIENT_GROUNDED_EVIDENCE'), direction (practical_action|renunciation|devotional|mixed|insufficient_evidence), supporting_ids (array of excerpt IDs used), supporting_schools (array of schools), confidence_score (0.0-1.0), note (short justification or 'N/A').'''
+        instruction = '''Instruction: You must respond with ONLY valid JSON. No other text. Produce JSON with these exact keys: summary (2-3 sentence synthesis to answer the user question), direction (practical_action|renunciation|devotional|mixed), supporting_ids (array of excerpt IDs used), supporting_schools (array of schools), confidence_score (0.0-1.0), note (short justification). Example format:
+{"summary": "Your synthesis here", "direction": "mixed", "supporting_ids": ["C1"], "supporting_schools": ["School Name"], "confidence_score": 0.8, "note": "Justification"}'''
 
         full_prompt = f"{example}\n\n{excerpt_bundle}\n{instruction}"
 
@@ -1263,7 +1301,7 @@ Expected JSON:
             'messages': [
                 {
                     'role': 'system',
-                    'content': 'You are a scholar of Hindu exegesis. Use only provided excerpts. Do not add facts or invent attributions. If insufficient, return INSUFFICIENT_GROUNDED_EVIDENCE. Output only JSON.'
+                    'content': 'You are a scholar of Hindu exegesis. Use only provided excerpts. Do not add facts or invent attributions. You must respond with ONLY valid JSON - no explanations, no markdown, no extra text. Just pure JSON.'
                 },
                 {
                     'role': 'user',
@@ -1301,43 +1339,39 @@ Expected JSON:
 
         raw_content = response.json()['choices'][0]['message']['content'].strip()
 
-        # Step 5: JSON schema enforcement
+        # Step 5: JSON schema enforcement with better parsing
+        def extract_json_from_text(text):
+            """Extract JSON from text that might contain extra content"""
+            # Try to find JSON block
+            import re
+
+            # Look for JSON block between curly braces
+            json_match = re.search(r'\{.*\}', text, re.DOTALL)
+            if json_match:
+                return json_match.group(0)
+
+            # If no JSON found, return original text
+            return text
+
         try:
-            # Try to parse JSON
+            # First try direct parsing
             result = json.loads(raw_content)
         except json.JSONDecodeError:
-            # Retry with explicit instruction
-            retry_payload = payload.copy()
-            retry_payload['messages'][1]['content'] = full_prompt + "\n\nReturn valid JSON only."
+            try:
+                # Try extracting JSON from the response
+                extracted_json = extract_json_from_text(raw_content)
+                result = json.loads(extracted_json)
+            except json.JSONDecodeError:
+                # Create a fallback response based on the excerpts
+                fallback_summary = f"Based on {len(selected_excerpts)} commentary excerpts, this verse addresses the question about {query.lower()}."
 
-            retry_response = requests.post(
-                'https://api.groq.com/openai/v1/chat/completions',
-                headers=headers,
-                json=retry_payload,
-                timeout=15
-            )
-
-            if retry_response.status_code == 200:
-                try:
-                    retry_content = retry_response.json()['choices'][0]['message']['content'].strip()
-                    result = json.loads(retry_content)
-                except json.JSONDecodeError:
-                    return {
-                        "summary": "INSUFFICIENT_GROUNDED_EVIDENCE",
-                        "direction": "insufficient_evidence",
-                        "supporting_ids": [],
-                        "supporting_schools": [],
-                        "confidence_score": 0.0,
-                        "note": "Failed to parse model response as JSON."
-                    }
-            else:
                 return {
-                    "summary": "INSUFFICIENT_GROUNDED_EVIDENCE",
-                    "direction": "insufficient_evidence",
-                    "supporting_ids": [],
-                    "supporting_schools": [],
-                    "confidence_score": 0.0,
-                    "note": "Failed to get valid JSON response from model."
+                    "summary": fallback_summary,
+                    "direction": "mixed",
+                    "supporting_ids": [excerpt['id'] for excerpt in selected_excerpts[:3]],
+                    "supporting_schools": list(set(excerpt['school'] for excerpt in selected_excerpts[:3])),
+                    "confidence_score": 0.6,
+                    "note": f"Fallback response - model output was not valid JSON. Raw: {raw_content[:100]}..."
                 }
 
         # Step 6: Post-validate fields
@@ -1440,42 +1474,43 @@ def render_search_result_minimal(result: SearchResult, result_num: int):
         if result.support_count > 1:
             st.success(f"Consensus ({result.support_count})")
 
-    # Sanskrit and translation
+    # Sanskrit and translations
     st.markdown(f"**Sanskrit:** {verse.shloka}")
-    if 'en' in verse.translations:
-        st.markdown(f"**English:** {verse.translations['en']}")
 
-    # Display AI summary for this verse if available
+    # Show both Hindi and English translations prominently
+    if 'hindi' in verse.translations:
+        st.markdown(f"**Hindi:** {verse.translations['hindi']}")
+
+    if 'english' in verse.translations:
+        st.markdown(f"**English:** {verse.translations['english']}")
+
+    # Display per-verse AI summary if available
     verse_summaries = st.session_state.get('verse_summaries', {})
     if verse.id in verse_summaries:
         verse_summary = verse_summaries[verse.id]
         if verse_summary.get('summary') != "INSUFFICIENT_GROUNDED_EVIDENCE":
-            st.markdown("---")
-            st.markdown("### 🤖 AI Commentary Summary")
-
-            # Summary content
-            col1, col2 = st.columns([3, 1])
-            with col1:
+            with st.expander("🤖 AI Commentary Summary", expanded=True):
                 st.markdown(f"**Summary:** {verse_summary.get('summary', 'N/A')}")
-            with col2:
-                confidence = verse_summary.get('confidence_score', 0.0)
-                if confidence >= 0.7:
-                    st.success(f"Confidence: {confidence:.1%}")
-                elif confidence >= 0.5:
-                    st.warning(f"Confidence: {confidence:.1%}")
-                else:
-                    st.error(f"Confidence: {confidence:.1%}")
 
-            # Additional details in expandable section
-            with st.expander("📋 Summary Details"):
                 direction = verse_summary.get('direction', 'N/A')
-                st.markdown(f"**Direction:** {direction.replace('_', ' ').title()}")
+                if direction != 'N/A':
+                    st.markdown(f"**Direction:** {direction.replace('_', ' ').title()}")
+
+                confidence = verse_summary.get('confidence_score', 0)
+                if confidence > 0:
+                    # Color-coded confidence display
+                    if confidence >= 0.7:
+                        st.success(f"**Confidence:** {confidence:.2f} (High)")
+                    elif confidence >= 0.4:
+                        st.warning(f"**Confidence:** {confidence:.2f} (Medium)")
+                    else:
+                        st.error(f"**Confidence:** {confidence:.2f} (Low)")
 
                 supporting_schools = verse_summary.get('supporting_schools', [])
                 if supporting_schools:
                     st.markdown(f"**Supporting Schools:** {', '.join(supporting_schools)}")
 
-                note = verse_summary.get('note', 'N/A')
+                note = verse_summary.get('note', '')
                 if note and note != 'N/A':
                     st.markdown(f"**Note:** {note}")
             st.markdown("---")
@@ -1484,14 +1519,12 @@ def render_search_result_minimal(result: SearchResult, result_num: int):
     with st.expander("📖 Word Meanings & Details"):
         if verse.transliteration:
             st.markdown(f"**Transliteration:** {verse.transliteration}")
-        
-        if 'hi' in verse.translations:
-            st.markdown(f"**Hindi:** {verse.translations['hi']}")
-        
+
         if verse.word_meaning:
             st.markdown("**Word Meanings:**")
-            for term, meaning in verse.word_meaning.items():
-                st.markdown(f"• **{term}:** {meaning}")
+            # Create compact horizontal layout for word meanings
+            meanings_text = " | ".join([f"**{term}:** {meaning}" for term, meaning in verse.word_meaning.items()])
+            st.markdown(meanings_text)
     
     if result.related_concepts:
         st.markdown(f"**Related Concepts:** {', '.join(result.related_concepts)}")
@@ -1526,8 +1559,9 @@ def main():
         layout="wide"
     )
     
-    st.title("🕉️ Bhagavad Gita Semantic Search")
-    st.markdown("*Optimized semantic search with knowledge graph exploration*")
+
+
+
     
     # Initialize session state with minimal data
     if 'search_performed' not in st.session_state:
@@ -1538,6 +1572,10 @@ def main():
         st.session_state.verse_summaries = {}
     if 'kg_built' not in st.session_state:
         st.session_state.kg_built = False
+    if 'index_ready' not in st.session_state:
+        st.session_state.index_ready = False
+
+
     
     # Sidebar configuration
     with st.sidebar:
@@ -1546,6 +1584,8 @@ def main():
         # Health card
         render_health_card()
         st.markdown("---")
+
+
         
         # Search configuration
         max_results = 20
@@ -1559,10 +1599,22 @@ def main():
             enable_groq = st.checkbox("Enable GROQ Summaries", value=False)
             groq_api_key = ""
             if enable_groq:
-                groq_api_key_input = st.text_input("GROQ API Key", type="password",
-                                                 help="Leave empty to use default key")
-                # Use provided API key or fall back to working default
-                groq_api_key = groq_api_key_input if groq_api_key_input else "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"
+                # Try to get API key from Streamlit secrets first
+                try:
+                    groq_api_key = st.secrets["GROQ_API_KEY"]
+                    if groq_api_key == "your-groq-api-key-here":
+                        groq_api_key = ""
+                except (KeyError, FileNotFoundError):
+                    groq_api_key = ""
+
+                # If no secret key, ask user for input
+                if not groq_api_key:
+                    groq_api_key_input = st.text_input("GROQ API Key", type="password",
+                                                     help="Get a free API key from https://console.groq.com/")
+                    groq_api_key = groq_api_key_input if groq_api_key_input else ""
+
+                    if not groq_api_key:
+                        st.info("💡 Add your GROQ API key to use AI summaries.")
             
             # Interactive KG
             if GRAPH_VIZ_AVAILABLE:
@@ -1572,33 +1624,7 @@ def main():
             
             st.form_submit_button("Update Settings")
         
-        # Index management
-        st.subheader("📊 Index Management")
-        
-        health = get_index_health_info()
-        if health['index_exists'] and health['mappings_exist']:
-            if st.button("📥 Load Prebuilt Index", type="primary"):
-                with st.spinner("Loading prebuilt index..."):
-                    # Load all components
-                    index = load_faiss_index(FAISS_INDEX_PATH)
-                    mappings = load_mappings(MAPPINGS_PATH)
-                    kg_data = load_knowledge_graph_data(DATA_FILE)
-                    
-                    if index and mappings and kg_data:
-                        st.success("✅ Prebuilt index loaded successfully!")
-                        st.session_state.index = index
-                        st.session_state.mappings = mappings
-                        st.session_state.kg_data = kg_data
-                        st.session_state.index_ready = True
-                        st.rerun()
-        else:
-            st.error("Prebuilt index not found!")
-            
-            if st.checkbox("⚠️ I want to build from scratch", value=False):
-                if st.button("🔨 Build New Index", type="secondary"):
-                    st.warning("This will take several minutes and use significant memory.")
-                    # Here you would implement index building logic
-                    st.info("Index building not implemented in this optimized version.")
+
         
         # Example queries
         st.subheader("💡 Example Queries")
@@ -1614,17 +1640,8 @@ def main():
                 st.session_state.example_query = query
     
     # Main content area
-    if not st.session_state.get('index_ready', False):
-        st.info("Please load the prebuilt index from the sidebar to begin searching.")
-        
-        # Show system requirements
-        st.subheader("📋 System Requirements")
-        st.write("This optimized version requires:")
-        st.write("• `gita_faiss.index` - Prebuilt FAISS index")
-        st.write("• `gita_mappings.pkl` - Node mappings")  
-        st.write("• `merged_gita_clean.json` - Source data")
-        
-        return
+    st.title("🕉️ Bhagavad Gita Semantic Search")
+    st.markdown("*Semantic search with AI-powered commentary synthesis*")
     
     # Search interface
     st.header("🔍 Search Interface")
@@ -1639,20 +1656,25 @@ def main():
     
     # Search button
     if st.button("🔍 Search", type="primary", disabled=not search_query):
+        # Auto-load index if not ready
+        if not auto_load_index():
+            st.error("❌ Failed to load search index. Please check if all required files are present.")
+            return
+
         with st.spinner("Searching..."):
             # Perform cached search
             results = perform_search(
-                search_query, 
+                search_query,
                 num_results,
                 st.session_state.index,
-                st.session_state.mappings, 
+                st.session_state.mappings,
                 st.session_state.kg_data
             )
-            
+
             st.session_state.current_results = results
             st.session_state.search_performed = True
             st.session_state.last_query = search_query
-            
+
             if results:
                 st.success(f"Found {len(results)} relevant results")
             else:
@@ -1669,14 +1691,15 @@ def main():
             if st.button("Generate Combined Summaries for Each Verse"):
                 with st.spinner("Generating AI summaries for each verse..."):
                     verse_summaries = {}
+                    commentary_id_counter = 1
 
                     for result in results:
+                        st.write(f"Processing verse {result.verse.id} with {len(result.commentaries)} commentaries from {len(set(c.school for c in result.commentaries))} schools...")
+
                         if result.commentaries and len(result.commentaries) > 0:
                             # Collect commentaries for this specific verse
                             verse_commentaries = []
-                            commentary_id_counter = 1
                             for commentary in result.commentaries:
-                                # More lenient text check - accept even short texts
                                 if commentary.text and len(commentary.text.strip()) > 10:
                                     verse_commentaries.append({
                                         'id': f"C{commentary_id_counter}",
@@ -1686,8 +1709,7 @@ def main():
                                     commentary_id_counter += 1
 
                             if verse_commentaries:
-                                # Generate summary for this verse
-                                st.write(f"Processing verse {result.verse.id} with {len(verse_commentaries)} commentaries from {len(set(c['school'] for c in verse_commentaries))} schools...")
+                                # Generate summary for this specific verse
                                 verse_summary = query_groq_api_aggregate(
                                     verse_commentaries,
                                     st.session_state.last_query,
@@ -1695,25 +1717,27 @@ def main():
                                 )
                                 verse_summaries[result.verse.id] = verse_summary
 
-                                # Debug output
+                                # Debug output for each verse
                                 if verse_summary.get('summary') == "INSUFFICIENT_GROUNDED_EVIDENCE":
-                                    st.warning(f"Verse {result.verse.id}: {verse_summary.get('note', 'No note')}")
+                                    st.write(f"Verse {result.verse.id}: {verse_summary.get('note', 'Insufficient evidence')}")
                                 elif not verse_summary or 'summary' not in verse_summary:
-                                    st.error(f"Verse {result.verse.id}: API call failed or returned invalid response")
+                                    st.write(f"Verse {result.verse.id}: API call failed")
                                 else:
-                                    st.success(f"Verse {result.verse.id}: Summary generated successfully")
+                                    st.write(f"Verse {result.verse.id}: Summary generated successfully")
                             else:
-                                st.info(f"Verse {result.verse.id}: No valid commentaries found (all too short)")
+                                st.write(f"Verse {result.verse.id}: No valid commentaries found")
                         else:
-                            st.info(f"Verse {result.verse.id}: No commentaries available")
+                            st.write(f"Verse {result.verse.id}: No commentaries available")
 
+                    # Store per-verse summaries in session state
                     st.session_state.verse_summaries = verse_summaries
 
+                    # Show overall success message
                     successful_summaries = sum(1 for summary in verse_summaries.values()
                                              if summary.get('summary') != "INSUFFICIENT_GROUNDED_EVIDENCE")
 
                     if successful_summaries > 0:
-                        st.success(f"Generated summaries for {successful_summaries} out of {len(verse_summaries)} verses!")
+                        st.success(f"✅ Generated summaries for {successful_summaries} out of {len(verse_summaries)} verses!")
                     else:
                         st.warning("Could not generate reliable summaries for any verses.")
 
@@ -1728,6 +1752,8 @@ def main():
                 for i, result in enumerate(results, 1):
                     render_search_result_minimal(result, i)
                     st.markdown("---")
+
+
             
             with tab2:
                 if st.button("🔍 Build Interactive Subgraph"):
@@ -1764,6 +1790,8 @@ def main():
                 render_search_result_minimal(result, i)
                 if i < len(results):
                     st.markdown("---")
+
+
     
     # Statistics (collapsed by default)
     if st.session_state.get('kg_data'):

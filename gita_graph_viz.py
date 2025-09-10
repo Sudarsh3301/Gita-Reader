@@ -409,8 +409,8 @@ class GitaGraphVisualizer:
             tooltip = f"<b>{data.get('title', 'Verse')}</b><br>"
             if 'shloka' in data:
                 tooltip += f"<i>{data['shloka'][:50]}...</i><br>"
-            if 'translations' in data and 'en' in data['translations']:
-                tooltip += f"{data['translations']['en'][:100]}..."
+            if 'translations' in data and 'english' in data['translations']:
+                tooltip += f"{data['translations']['english'][:100]}..."
                 
         elif node_type == 'concept':
             tooltip = f"<b>{data.get('title', 'Concept')}</b><br>"
@@ -514,8 +514,11 @@ def render_node_details_panel(kg, selected_node_id: str = None):
             if verse.transliteration:
                 st.markdown(f"**Transliteration:** {verse.transliteration}")
             
-            if 'en' in verse.translations:
-                st.markdown(f"**English:** {verse.translations['en']}")
+            if 'english' in verse.translations:
+                st.markdown(f"**English:** {verse.translations['english']}")
+
+            if 'hindi' in verse.translations:
+                st.markdown(f"**Hindi:** {verse.translations['hindi']}")
             
             if verse.word_meaning:
                 st.markdown("**Word Meanings:**")
@@ -524,7 +527,7 @@ def render_node_details_panel(kg, selected_node_id: str = None):
                     
             # Export button
             if st.button("📋 Copy Verse Text", key=f"copy_{node_key}"):
-                verse_text = f"BG {verse.chapter}.{verse.verse}\n{verse.shloka}\n{verse.translations.get('en', '')}"
+                verse_text = f"BG {verse.chapter}.{verse.verse}\n{verse.shloka}\n{verse.translations.get('english', '')}"
                 st.text_area("Verse Text (Ctrl+A, Ctrl+C to copy):", verse_text, height=100)
     
     elif node_type == 'concept':
